@@ -10,7 +10,7 @@ import sys
 
 try:
     import pymysql as Database
-    from pymysql.converters import conversions
+    from pymysql.converters import decoders
     from pymysql.constants import FIELD_TYPE, CLIENT
     backend = 'pymysql'
 
@@ -20,14 +20,23 @@ except ImportError:
     raise ImproperlyConfigured("Error loading PyMySQL module: %s" % e)
 
 from django.db import utils
-from django.db.backends import *
+from django.db.backends import utils as backend_utils
+from django.db.backends.base.operations import BaseDatabaseOperations
+from django.db.backends.base.base import BaseDatabaseWrapper
+
 from django.db.backends.signals import connection_created
 from django.db.backends.mysql.client import DatabaseClient
 from django.db.backends.mysql.creation import DatabaseCreation
 from .introspection import DatabaseIntrospection
 from django.db.backends.mysql.validation import DatabaseValidation
-from django.utils.safestring import SafeString, SafeUnicode
+from django.utils.safestring import SafeBytes, SafeText
 from django.utils.timezone import is_aware, is_naive, utc
+from django.utils.encoding import force_str, force_text
+from .schema import DatabaseSchemaEditor
+from .features import DatabaseFeatures                      # isort:skip
+
+from django.utils import six
+from django.utils.functional import cached_property
 
 # Raise exceptions for database warnings if DEBUG is on
 from django.conf import settings
@@ -43,31 +52,23 @@ IntegrityError = Database.IntegrityError
 from pymysql.err import error_map
 error_map[1048] = IntegrityError
 
-django_conversions = conversions.copy()
+django_conversions = decoders.copy()
 # It's impossible to import datetime_or_None directly from MySQLdb.times
-datetime_or_None = conversions[FIELD_TYPE.DATETIME]
+datetime_or_None = decoders[FIELD_TYPE.DATETIME]
 
 # As with the MySQLdb adapter, PyMySQL returns TIME columns as timedelta --
 # so we add a conversion here
-def datetime_or_None_with_timezone_support(connection, field, obj):
-    dt = datetime_or_None(connection, field, obj)
+def datetime_or_None_with_timezone_support(obj):
+    dt = datetime_or_None(obj)
     # Confirm that dt is naive before overwriting its tzinfo.
     if dt is not None and settings.USE_TZ and is_naive(dt):
         dt = dt.replace(tzinfo=utc)
     return dt
 
-# The conversion functions in django.db.util only accept one argument, while
-# the PyMySQL converters require three. This adapter function produces a
-# PyMySQL-compabtible conversion function, given the Django function.
-def conversion_adapter(fn):
-    def converter(connection, field, obj):
-        return fn(obj)
-    return converter
-
 django_conversions.update({
-    FIELD_TYPE.TIME: conversion_adapter(util.typecast_time),
-    FIELD_TYPE.DECIMAL: conversion_adapter(util.typecast_decimal),
-    FIELD_TYPE.NEWDECIMAL: conversion_adapter(util.typecast_decimal),
+    FIELD_TYPE.TIME: backend_utils.typecast_time,
+    FIELD_TYPE.DECIMAL: backend_utils.typecast_decimal,
+    FIELD_TYPE.NEWDECIMAL: backend_utils.typecast_decimal,
     FIELD_TYPE.DATETIME: datetime_or_None_with_timezone_support,
 })
 
@@ -148,37 +149,6 @@ class CursorWrapper(object):
     def __iter__(self):
         return iter(self.cursor)
 
-class DatabaseFeatures(BaseDatabaseFeatures):
-    empty_fetchmany_value = ()
-    update_can_self_select = False
-    allows_group_by_pk = True
-    related_fields_match_type = True
-    allow_sliced_subqueries = False
-    has_bulk_insert = True
-    has_select_for_update = True
-    has_select_for_update_nowait = False
-    supports_forward_references = False
-    supports_long_model_names = False
-    supports_microsecond_precision = False
-    supports_regex_backreferencing = False
-    supports_date_lookup_using_string = False
-    supports_timezones = False
-    requires_explicit_null_ordering_when_grouping = True
-    allows_primary_key_0 = False
-
-    def _can_introspect_foreign_keys(self):
-        "Confirm support for introspected foreign keys"
-        cursor = self.connection.cursor()
-        cursor.execute('CREATE TABLE INTROSPECT_TEST (X INT)')
-        # This command is MySQL specific; the second column
-        # will tell you the default table type of the created
-        # table. Since all Django's test tables will have the same
-        # table type, that's enough to evaluate the feature.
-        cursor.execute("SHOW TABLE STATUS WHERE Name='INTROSPECT_TEST'")
-        result = cursor.fetchone()
-        cursor.execute('DROP TABLE INTROSPECT_TEST')
-        return result[1] != 'MyISAM'
-
 class DatabaseOperations(BaseDatabaseOperations):
     compiler_module = "django.db.backends.mysql.compiler"
 
@@ -226,7 +196,7 @@ class DatabaseOperations(BaseDatabaseOperations):
         # With MySQLdb, cursor objects have an (undocumented) "_last_executed"
         # attribute where the exact query sent to the database is saved.
         # See MySQLdb/cursors.py in the source distribution.
-        return cursor._last_executed
+        return getattr(cursor, '_last_executed', None)
 
     def no_limit_value(self):
         # 2**64 - 1, as recommended by the MySQL documentation
@@ -240,7 +210,7 @@ class DatabaseOperations(BaseDatabaseOperations):
     def random_function_sql(self):
         return 'RAND()'
 
-    def sql_flush(self, style, tables, sequences):
+    def sql_flush(self, style, tables, sequences, allow_cascade=False):
         # NB: The generated SQL below is specific to MySQL
         # 'TRUNCATE x;', 'TRUNCATE y;', 'TRUNCATE z;'... style SQL statements
         # to clear all tables of all data
@@ -303,6 +273,42 @@ class DatabaseOperations(BaseDatabaseOperations):
 
 class DatabaseWrapper(BaseDatabaseWrapper):
     vendor = 'mysql'
+    
+    _data_types = {
+        'AutoField': 'integer AUTO_INCREMENT',
+        'BinaryField': 'longblob',
+        'BooleanField': 'bool',
+        'CharField': 'varchar(%(max_length)s)',
+        'CommaSeparatedIntegerField': 'varchar(%(max_length)s)',
+        'DateField': 'date',
+        'DateTimeField': 'datetime',
+        'DecimalField': 'numeric(%(max_digits)s, %(decimal_places)s)',
+        'DurationField': 'bigint',
+        'FileField': 'varchar(%(max_length)s)',
+        'FilePathField': 'varchar(%(max_length)s)',
+        'FloatField': 'double precision',
+        'IntegerField': 'integer',
+        'BigIntegerField': 'bigint',
+        'IPAddressField': 'char(15)',
+        'GenericIPAddressField': 'char(39)',
+        'NullBooleanField': 'bool',
+        'OneToOneField': 'integer',
+        'PositiveIntegerField': 'integer UNSIGNED',
+        'PositiveSmallIntegerField': 'smallint UNSIGNED',
+        'SlugField': 'varchar(%(max_length)s)',
+        'SmallIntegerField': 'smallint',
+        'TextField': 'longtext',
+        'TimeField': 'time',
+        'UUIDField': 'char(32)',
+    }
+
+    @cached_property
+    def data_types(self):
+        if self.features.supports_microsecond_precision:
+            return dict(self._data_types, DateTimeField='datetime(6)', TimeField='time(6)')
+        else:
+            return self._data_types
+
     operators = {
         'exact': '= %s',
         'iexact': 'LIKE %s',
@@ -320,6 +326,62 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         'iendswith': 'LIKE %s',
     }
 
+#
+#	Imported from native mysql module of 1.6
+#		
+    def _set_autocommit(self, autocommit):
+        self.connection.autocommit(autocommit)
+
+
+    def init_connection_state(self):
+        cursor = self.connection.cursor()
+        # SQL_AUTO_IS_NULL in MySQL controls whether an AUTO_INCREMENT column
+        # on a recently-inserted row will return when the field is tested for
+        # NULL.  Disabling this value brings this aspect of MySQL in line with
+        # SQL standards.
+        cursor.execute('SET SQL_AUTO_IS_NULL = 0')
+        cursor.close()
+
+    def get_new_connection(self, conn_params):
+        conn = Database.connect(**conn_params)
+        conn.encoders[SafeText] = conn.encoders[six.text_type]
+        conn.encoders[SafeBytes] = conn.encoders[bytes]
+        return conn
+
+    def schema_editor(self, *args, **kwargs):
+        "Returns a new instance of this backend's SchemaEditor"
+        return DatabaseSchemaEditor(self, *args, **kwargs)
+
+    def get_connection_params(self):
+        kwargs = {
+            'conv': django_conversions,
+            'charset': 'utf8',
+        }
+        if six.PY2:
+            kwargs['use_unicode'] = True
+        settings_dict = self.settings_dict
+        if settings_dict['USER']:
+            kwargs['user'] = settings_dict['USER']
+        if settings_dict['NAME']:
+            kwargs['db'] = settings_dict['NAME']
+        if settings_dict['PASSWORD']:
+            kwargs['passwd'] = force_str(settings_dict['PASSWORD'])
+        if settings_dict['HOST'].startswith('/'):
+            kwargs['unix_socket'] = settings_dict['HOST']
+        elif settings_dict['HOST']:
+            kwargs['host'] = settings_dict['HOST']
+        if settings_dict['PORT']:
+            kwargs['port'] = int(settings_dict['PORT'])
+        # We need the number of potentially affected rows after an
+        # "UPDATE", not the number of changed rows.
+        kwargs['client_flag'] = CLIENT.FOUND_ROWS
+        kwargs.update(settings_dict['OPTIONS'])
+        return kwargs
+#
+#	EOI
+#
+		
+	
     def __init__(self, *args, **kwargs):
         super(DatabaseWrapper, self).__init__(*args, **kwargs)
 
@@ -330,6 +392,9 @@ class DatabaseWrapper(BaseDatabaseWrapper):
         self.creation = DatabaseCreation(self)
         self.introspection = DatabaseIntrospection(self)
         self.validation = DatabaseValidation(self)
+
+        self.Database = Database
+
 
     def _valid_connection(self):
         if self.connection is not None:
@@ -367,9 +432,11 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             # "UPDATE", not the number of changed rows.
             kwargs['client_flag'] = CLIENT.FOUND_ROWS
             kwargs.update(settings_dict['OPTIONS'])
+            kwargs['autocommit'] = self.autocommit = settings_dict.get('AUTOCOMMIT', True)
             self.connection = Database.connect(**kwargs)
-            self.connection.encoders[SafeUnicode] = self.connection.encoders[text_type]
-            self.connection.encoders[SafeString] = self.connection.encoders[str]
+
+            self.connection.encoders[SafeText] = self.connection.encoders[text_type]
+            self.connection.encoders[SafeBytes] = self.connection.encoders[str]
             connection_created.send(sender=self.__class__, connection=self)
         cursor = self.connection.cursor()
         if new_connection:

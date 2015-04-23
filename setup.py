@@ -1,17 +1,17 @@
 from setuptools import setup, find_packages
 setup(
     name = "django-mysql-pymysql",
-    version = "0.1",
+    version = "0.3",
     packages = find_packages('src'),
     package_dir = {'':'src'},
 
     # metadata for upload to PyPI, one day
-    author = "Ian Clelland",
-    author_email = "clelland@gmail.com",
+    author = "Ivan Belokoyblskiy",
+    author_email = "belokobylskij@gmail.com",
     description = "Django MySQL backend for PyMySQL adapter",
     license = "BSD",
     keywords = "django mysql pymysql",
-    url = "https://github.com/clelland/django-mysql-pymysql",
+    url = "https://github.com/devbis/django-mysql-pymysql",
 
     classifiers = [
         "Development Status :: 4 - Beta",
@@ -27,6 +27,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.2",
         "Programming Language :: Python :: 3.3",
+        "Programming Language :: Python :: 3.4",
         "Topic :: Database :: Front-Ends",
     ],
 
@@ -34,31 +35,27 @@ setup(
 django-mysql-pymysql
 ====================
 
-This is a Django database backend for MySQL, using the PyMySQL database adapter. It is intended to be a drop-in replacement for the built-in MySQLdb backend, and leverages quite a bit of its code.
+This is a Django-1.8 database backend for MySQL, using the PyMySQL database adapter. It is intended to be a drop-in replacement for the built-in MySQLdb backend, and leverages quite a bit of its code.
 
-It is currently experimental, and has only been tested against Django trunk (1.4-pre-alpha), and Vinay Sajip's Py3k branch on BitBucket (https://bitbucket.org/vinay.sajip/django). At the moment, it won't work with Django 1.3, as it uses Aymeric Augustin's timezone-aware datetime patch.
+It is currently experimental, and has only been tested against Django 1.8 final.
 
 
 Requirements
 ------------
 
-* Django trunk or Py3k Branch
+* Django >= 1.8
 * PyMySQL (patches here: https://github.com/clelland/PyMySQL)
 
 Installation
 ------------
 
-::
-
 1. Clone and install into your site-packages directory:
 
-        $ git clone https://github.com/clelland/django-mysql-pymysql
+        $ git clone https://github.com/devbis/django-mysql-pymysql
         $ cd django-mysql-pymysql
         $ python setup.py install
 
 2. Edit your settings file:
-
-::
 
         DATABASES = {
             'default': {
