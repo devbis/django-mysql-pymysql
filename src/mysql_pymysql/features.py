@@ -22,6 +22,7 @@ class DatabaseFeatures(BaseDatabaseFeatures):
     can_release_savepoints = True
     atomic_transactions = False
     supports_column_check_constraints = False
+    supports_microsecond_precision = False
 
     def _can_introspect_foreign_keys(self):
         "Confirm support for introspected foreign keys"
