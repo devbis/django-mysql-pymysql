@@ -10,7 +10,7 @@ Requirements
 ------------
 
 * Django >= 1.8
-* PyMySQL (patches here: https://github.com/clelland/PyMySQL)
+* PyMySQL >= 0.6.2
 
 Installation
 ------------
