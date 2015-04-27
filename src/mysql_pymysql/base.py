@@ -433,6 +433,9 @@ class DatabaseWrapper(BaseDatabaseWrapper):
             kwargs['client_flag'] = CLIENT.FOUND_ROWS
             kwargs.update(settings_dict['OPTIONS'])
             kwargs['autocommit'] = self.autocommit = settings_dict.get('AUTOCOMMIT', True)
+            if 'timeout' in kwargs:
+                kwargs['connect_timeout'] = int(kwargs.pop('timeout'))
+
             self.connection = Database.connect(**kwargs)
 
             self.connection.encoders[SafeText] = self.connection.encoders[text_type]
